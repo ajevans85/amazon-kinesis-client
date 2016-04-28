@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
@@ -37,7 +38,6 @@ import com.amazonaws.services.dynamodbv2.model.LimitExceededException;
 import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughput;
 import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughputExceededException;
 import com.amazonaws.services.dynamodbv2.model.PutItemRequest;
-import com.amazonaws.services.dynamodbv2.model.ResourceInUseException;
 import com.amazonaws.services.dynamodbv2.model.ResourceNotFoundException;
 import com.amazonaws.services.dynamodbv2.model.ScanRequest;
 import com.amazonaws.services.dynamodbv2.model.ScanResult;
@@ -63,7 +63,7 @@ public class LeaseManager<T extends Lease> implements ILeaseManager<T> {
 
     /**
      * Constructor.
-     * 
+     *
      * @param table leases table
      * @param dynamoDBClient DynamoDB client to use
      * @param serializer LeaseSerializer to use to convert to/from DynamoDB objects.
@@ -77,7 +77,7 @@ public class LeaseManager<T extends Lease> implements ILeaseManager<T> {
      * - our code is meant to be resilient to inconsistent reads. Using consistent reads during testing speeds up
      * execution of simple tests (you don't have to wait out the consistency window). Test cases that want to experience
      * eventual consistency should not set consistentReads=true.
-     * 
+     *
      * @param table leases table
      * @param dynamoDBClient DynamoDB client to use
      * @param serializer lease serializer to use
@@ -100,31 +100,47 @@ public class LeaseManager<T extends Lease> implements ILeaseManager<T> {
     @Override
     public boolean createLeaseTableIfNotExists(Long readCapacity, Long writeCapacity)
         throws ProvisionedThroughputException, DependencyException {
-        verifyNotNull(readCapacity, "readCapacity cannot be null");
-        verifyNotNull(writeCapacity, "writeCapacity cannot be null");
 
-        boolean tableDidNotExist = true;
-        CreateTableRequest request = new CreateTableRequest();
-        request.setTableName(table);
-        request.setKeySchema(serializer.getKeySchema());
-        request.setAttributeDefinitions(serializer.getAttributeDefinitions());
+        boolean tableDidNotExist = !isTableExists();
 
-        ProvisionedThroughput throughput = new ProvisionedThroughput();
-        throughput.setReadCapacityUnits(readCapacity);
-        throughput.setWriteCapacityUnits(writeCapacity);
-        request.setProvisionedThroughput(throughput);
+        if(tableDidNotExist) {
+            verifyNotNull(readCapacity, "readCapacity cannot be null");
+            verifyNotNull(writeCapacity, "writeCapacity cannot be null");
+
+            CreateTableRequest request = new CreateTableRequest();
+            request.setTableName(table);
+            request.setKeySchema(serializer.getKeySchema());
+            request.setAttributeDefinitions(serializer.getAttributeDefinitions());
+
+            ProvisionedThroughput throughput = new ProvisionedThroughput();
+            throughput.setReadCapacityUnits(readCapacity);
+            throughput.setWriteCapacityUnits(writeCapacity);
+            request.setProvisionedThroughput(throughput);
+
+            try {
+                dynamoDBClient.createTable(request);
+            } catch (LimitExceededException e) {
+                throw new ProvisionedThroughputException("Capacity exceeded when creating table " + table, e);
+            } catch (AmazonClientException e) {
+                throw new DependencyException(e);
+            }
+        }
+
+        return tableDidNotExist;
+
+    }
+
+    private boolean isTableExists() {
+        GetItemRequest getItemReq = new GetItemRequest()
+                .withTableName(table)
+                .withKey(serializer.getDynamoHashKey("noop"));
 
         try {
-            dynamoDBClient.createTable(request);
-        } catch (ResourceInUseException e) {
-            tableDidNotExist = false;
-            LOG.info("Table " + table + " already exists.");
-        } catch (LimitExceededException e) {
-            throw new ProvisionedThroughputException("Capacity exceeded when creating table " + table, e);
-        } catch (AmazonClientException e) {
-            throw new DependencyException(e);
+            dynamoDBClient.getItem(getItemReq);
+            return true;
+        } catch (ResourceNotFoundException e) {
+            return false;
         }
-        return tableDidNotExist;
     }
 
     /**
